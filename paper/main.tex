@@ -1,0 +1,191 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{enumitem}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{definition}{Definition}
+
+\title{Pricing Bermudan Options by Least-Squares Monte Carlo:\\
+The In-Sample Bias, a Comparison of Regression Methods, and a Dual Upper Bound}
+
+\author{Chan Tsz Him Chris}
+\date{July 23, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We price a Bermudan put under the Black--Scholes model using the Longstaff--Schwartz least-squares Monte Carlo (LSM) algorithm and ask two questions: how much does the choice of regression basis for the continuation value actually matter, and why does the naive in-sample LSM estimate overstate the true price. We show, by direct construction, that evaluating an exercise decision on the same paths used to fit its regression produces an upward-biased estimate, and that the correct fix, fitting the policy on one path set and pricing it on an independent set, produces a valid lower bound regardless of how suboptimal the fitted policy is. On a 12-date Bermudan put ($S_0=100$, $K=100$, $\sigma=0.2$, $r=0.10$, $q=0.02$, $T=0.5$), four regression bases, a degree-7 polynomial, a piecewise-linear basis, Nadaraya--Watson kernel regression, and a two-parameter Black--Scholes-price basis, produce out-of-sample lower bounds of \$4.147, \$4.109, \$4.130, and \$4.144 respectively (100{,}000 independent test paths), all within two standard errors of each other despite a 750$\times$ difference in compute time. We then construct an Andersen--Broadie dual upper bound from the piecewise-linear policy via nested simulation, obtaining \$4.339 ($\pm$\$0.082), which brackets that policy's own lower bound of \$4.109 and gives a direct, if noisy, read on how far a cheap regression policy sits from optimal. We also flag a maturity/discounting inconsistency in the source notebook's introductory demonstration that inflates its reported figures and should not be treated as a validated benchmark.
+\end{abstract}
+
+\section{Introduction}
+
+A Bermudan option can be exercised on a fixed, discrete set of dates before maturity, and its price requires solving an optimal stopping problem: at each exercise date, the holder compares the immediate exercise payoff against the expected value of continuing, but that continuation value is itself an expectation of a future optimal decision, defined only implicitly. Longstaff and Schwartz \cite{longstaffschwartz2001} solved this by regressing simulated continuation payoffs onto basis functions of the current state, turning an intractable dynamic program into a sequence of ordinary least-squares fits.
+
+Two practical questions follow immediately from that construction. First, the regression is only ever an approximation to the true conditional expectation, so what happens if it is evaluated on the very same simulated paths used to fit it? Second, given that the choice of basis functions is arbitrary, how much does that choice actually change the final price? We answer both here on a concrete Bermudan put, using code and a worked derivation adapted from a course notebook on the algorithm.
+
+\section{Related Work}
+\label{sec:related}
+
+LSM sits within a small family of regression-based simulation methods for American-style pricing that emerged around the same time. \cite{carriere1996} was arguably first, using nonparametric kernel regression to estimate the continuation value along simulated paths, the same conditional-expectation-by-regression idea that Longstaff and Schwartz \cite{longstaffschwartz2001} later popularized with a parametric polynomial basis. \cite{tsitsiklisvanroy2001} took a related but distinct approach around the same time, applying approximate dynamic programming with a parameterized value function fit by regression at each step rather than fitting the continuation value directly; the two families are close cousins that later literature sometimes conflates.
+
+Two further questions the method's originators left comparatively underexplored are exactly the ones we take up here. \cite{morenonavas2003} is the closest precedent for our basis-function comparison: testing monomial, Laguerre, and Chebyshev bases on American puts, they find LSM prices are largely insensitive to that choice, with more sensitivity emerging only for more complex derivatives. Our finding, that a polynomial, a piecewise-linear basis, a kernel regression, and a Black--Scholes-informed basis all agree to within statistical noise on a Bermudan put, is consistent with their conclusion, extended to a more heterogeneous set of basis families than the polynomial-basis comparisons they consider.
+
+Bounding a regression-based estimate, rather than merely reporting it, also predates the specific dual construction we use. \cite{broadieglasserman1997} introduced a simulation-based pair of high- and low-biased estimators from a stochastic mesh, establishing the idea of bracketing the true price from both sides via simulation alone. The martingale duality we use instead, due to \cite{rogers2002} and \cite{haughkogan2004} and made computationally practical by Andersen and Broadie \cite{andersenbroadie2004}, achieves the same bracketing with a cleaner guarantee: the upper bound is valid in expectation for \emph{any} martingale built from \emph{any} approximate value function, not only a well-tuned one, which is what lets us reuse our already-fitted piecewise-linear policy directly (Section~\ref{sec:dual}) rather than build a bespoke bounding procedure.
+
+\section{Setup and the Longstaff--Schwartz Algorithm}
+\label{sec:setup}
+
+Exercise dates are $0 = t_0 < t_1 < \cdots < t_N = T$. On date $t_i$, the immediate exercise payoff of a put is $F_{t_i} = h(S_{t_i}) = \max(K - S_{t_i}, 0)$, and the continuation value is
+
+\begin{equation}
+C_{t_i} = \mathbb{E}^{\mathbb{Q}}\bigl[D_{t_i,t_{i+1}} V_{t_{i+1}} \mid \mathcal{F}_{t_i}\bigr], \qquad V_{t_{i+1}} = \max(F_{t_{i+1}}, C_{t_{i+1}}),
+\end{equation}
+
+where $D_{t_i,t_{i+1}} = e^{-r(t_{i+1}-t_i)}$ under constant $r$. LSM replaces this conditional expectation, backward from maturity, with a cross-sectional regression: at each date $t_i$, regress the discounted realized cash flow $Y^{(m)} = D_{t_i,t_{i+1}} X_{t_{i+1}}^{(m)}$ on basis functions of $S_{t_i}^{(m)}$ across the $M$ simulated paths, giving a fitted $\widehat C_{t_i}(S)$; exercise on path $m$ whenever $F_{t_i}^{(m)} \ge \widehat C_{t_i}(S_{t_i}^{(m)})$, and continue (carrying $X_{t_{i+1}}^{(m)}$ forward, discounted) otherwise. The price at $t=0$ is the sample average of the resulting discounted cash flow $X_{t_1}$.
+
+We use a Black--Scholes underlying, $dS_t = (r-q)S_t\,dt + \sigma S_t\,dW_t$, and price a put with $S_0=K=100$, $\sigma=0.2$, $r=0.10$, $q=0.02$, $T=0.5$ years, on $N=12$ equally spaced exercise dates.
+
+\section{The In-Sample Bias}
+\label{sec:bias}
+
+The source notebook's introductory demonstration simulates 10{,}000 paths on a monthly grid, fits a degree-2 polynomial regression at each step, and evaluates the resulting exercise decisions on the \emph{same} 10{,}000 paths used to fit them. This gives an estimate of \$4.928, against a closed-form European benchmark of \$4.560 on the same paths.\footnote{We note, for the record, an inconsistency in that demonstration: the simulated path grid runs from $t=0$ to $t=1$ (a full year), while the European benchmark and a separately stated ``reference'' Bermudan price of \$5.152 both discount as though $T=0.5$. The three figures are internally consistent with each other under that same mismatch, but do not correspond to a correctly specified $T=0.5$ option and are not used as benchmarks below; Section~\ref{sec:results} uses a separately, correctly specified $T=0.5$ pipeline throughout.}
+
+Evaluating a fitted policy on its own training paths is optimistic, not because the regression is wrong on average, but because the exercise decision is a $\max$ over a noisy estimate: at points where $\widehat C_{t_i}(S)$ happens to be too low relative to the true continuation value purely from regression noise, the algorithm exercises early and locks in a payoff that the path's out-of-sample continuation would not have delivered. Because that noise is realized \emph{jointly} with the very cash flows being averaged, the in-sample price estimate is systematically pulled upward, a look-ahead bias rather than a modeling error. The correct diagnosis is not to trust this number, but to separate the policy-fitting step from the pricing step entirely.
+
+\section{Out-of-Sample Lower Bound}
+\label{sec:lowerbound}
+
+\begin{proposition}
+Let $\pi$ be any fixed, admissible (non-anticipating) exercise policy for the Bermudan option, and let $V(\pi)$ denote its expected discounted payoff under $\mathbb{Q}$. Then $V(\pi) \le V^\star$, the true Bermudan price, since $V^\star = \sup_\pi V(\pi)$ by definition of optimal stopping. Consequently, any unbiased Monte Carlo estimate of $V(\pi)$ for a fixed $\pi$ is a valid, unbiased estimate of a lower bound on $V^\star$.
+\end{proposition}
+
+This is what licenses the standard two-stage LSM pricing procedure: fit the regression-based policy $\widehat\pi$ on one set of simulated paths (here $M=10{,}000$), fix it, and then simulate a fresh, independent set of paths ($M'=100{,}000$) on which $\widehat\pi$ is applied but never refit. Because $\widehat\pi$ no longer depends on the test paths, the resulting sample average is an unbiased estimate of $V(\widehat\pi)$, and by the proposition, $V(\widehat\pi) \le V^\star$ regardless of how good or bad $\widehat\pi$ is as an approximation to the optimal policy. This is why the lower-bound estimate below is smaller than the (unreliable) in-sample figure of Section~\ref{sec:bias}: the bias in Section~\ref{sec:bias} pushed the naive estimate above $V(\widehat\pi)$, and possibly above $V^\star$ itself; the out-of-sample procedure removes that inflation by construction.
+
+\section{Regression Methods Compared}
+
+We compare four bases for $\widehat C_{t_i}(\cdot)$, fitted only on in-the-money paths at each date:
+
+\begin{itemize}
+\item \textbf{Polynomial}: a degree-7 fit, $\widehat C_{t_i}(S) = \sum_{k=0}^{7} \beta_k S^k$.
+\item \textbf{Piecewise-linear}: a hinge basis with knots at $50$ and the strike-adjacent knot of a 10-point grid on $[50,K]$, fit by ordinary least squares.
+\item \textbf{Nadaraya--Watson kernel regression}: $\widehat C_{t_i}(s) = \sum_m w_m(s)\, Y^{(m)}$ with Gaussian kernel weights $w_m(s) \propto \exp(-\tfrac{1}{2}((S_{t_i}^{(m)}-s)/h)^2)$ and bandwidth $h$ set by Silverman's rule of thumb.
+\item \textbf{Black--Scholes basis}: a two-parameter fit $\widehat C_{t_i}(S) = \beta_0 + \beta_1\, P_{\mathrm{BS}}(S, K, r, \bar\sigma, \tau)$, where $P_{\mathrm{BS}}$ is the closed-form European put price at remaining time $\tau = T - t_i$ and $\bar\sigma = 0.2$, fit by ordinary least squares on the two regressors $\{1, P_{\mathrm{BS}}\}$.
+\end{itemize}
+
+The Black--Scholes basis is the most theory-informed of the four: since the true continuation value of a Bermudan put converges to the European value as the remaining exercise opportunities become uninformative, using $P_{\mathrm{BS}}$ itself as a single regressor is a natural low-dimensional approximation, at the cost of assuming the functional form of that relationship is (approximately) affine in $P_{\mathrm{BS}}$ rather than letting the data determine the shape.
+
+\section{Results}
+\label{sec:results}
+
+\begin{table}[htbp]\centering
+\caption{Out-of-sample lower-bound estimates, 100{,}000 independent test paths, policy fitted on 10{,}000 training paths. European benchmark (closed-form Black--Scholes put, same parameters): \$3.7477.}
+\label{tab:results}
+\begin{tabular}{lccc}
+\toprule
+Method & Price & $2\times$SE & Wall time \\
+\midrule
+Degree-7 polynomial     & \$4.1470 & \$0.0321 & 0.2s \\
+Piecewise-linear        & \$4.1093 & \$0.0343 & 0.2s \\
+Nadaraya--Watson kernel & \$4.1297 & \$0.0309 & 154.7s \\
+Black--Scholes basis    & \$4.1441 & \$0.0318 & 0.4s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All four estimates fall within roughly $\$0.04$ of each other, well inside two standard errors of one another, despite the Nadaraya--Watson kernel regression taking over 350 times longer to fit than any of the three parametric alternatives. Every lower bound sits comfortably above the European benchmark of \$3.7477, an early-exercise premium of \$0.36--\$0.40, consistent with the positive early-exercise incentive expected from $r > q$ on a put. The theory-informed Black--Scholes basis performs essentially identically to the two-knot-richer piecewise-linear basis and the flexible degree-7 polynomial, at a fraction of the latter's conditioning risk (discussed next).
+
+The degree-7 polynomial fit also triggers a numerical rank warning at several exercise dates, a sign of ill-conditioning from fitting a high-degree polynomial to a modest number of in-the-money paths; despite this, its lower bound is not visibly degraded relative to the other two methods here, though this conditioning issue would be worth resolving (e.g. via an orthogonal polynomial basis) before trusting the method on a harder problem.
+
+\section{A Dual Upper Bound}
+\label{sec:dual}
+
+The lower bound of Section~\ref{sec:lowerbound} says nothing on its own about how close a fitted policy is to optimal. Rogers \cite{rogers2002} and Haugh and Kogan \cite{haughkogan2004} independently showed that the Bermudan pricing problem admits a dual representation: for \emph{any} martingale $M$ with $M_{t_0}=0$,
+
+\begin{equation}
+V^\star \;\le\; \mathbb E^{\mathbb Q}\Bigl[\max_{0\le i\le N} \bigl(D_{t_0,t_i} F_{t_i} - M_{t_i}\bigr)\Bigr],
+\end{equation}
+
+with equality when $M$ is the martingale part of the Doob--Meyer decomposition of the discounted optimal value process. Andersen and Broadie \cite{andersenbroadie2004} turned this into a practical algorithm: build $M$ from an \emph{approximate} value function $\widehat V_i(S) = \max(F_i(S), \widehat C_i(S))$ via
+
+\begin{equation}
+M_{t_i} = M_{t_{i-1}} + D_{t_0,t_i}\widehat V_i(S_{t_i}) - \mathbb E\bigl[D_{t_0,t_i}\widehat V_i(S_{t_i}) \mid \mathcal F_{t_{i-1}}\bigr], \qquad M_{t_0}=0,
+\end{equation}
+
+where the conditional expectation is itself estimated by \emph{nested} simulation: from every outer-path state $S_{t_{i-1}}$, simulate $n_{\text{inner}}$ one-step sub-paths forward to $t_i$ and average $\widehat V_i$ over them. This is a valid upper bound in expectation for \emph{any} choice of $\widehat V$, not only the optimal one; a cruder $\widehat V$ only loosens the bound, it does not invalidate it.
+
+We build $M$ from the piecewise-linear policy of Section~\ref{sec:lowerbound}, on $n_{\text{outer}}=4{,}000$ fresh outer paths with $n_{\text{inner}}=500$ nested sub-paths per outer state per exercise date. This gives a dual upper-bound estimate of
+
+\begin{equation}
+\widehat U = \$4.3387 \quad (2\times\text{SE} = \$0.0819),
+\end{equation}
+
+computed in 2.5 seconds, three orders of magnitude faster than the kernel-regression lower bound despite the nested simulation, since only 500 sub-paths per date-state pair are needed rather than a full second regression fit. Paired with the piecewise-linear policy's own lower bound of \$4.1093, this gives the bracket
+
+\begin{equation}
+\$4.1093 \;\le\; V^\star \;\le\; \$4.3387,
+\end{equation}
+
+a duality gap of about \$0.23. Because both bounds are built from the same fitted policy, that gap is a direct, if noisy, estimate of how much value the piecewise-linear regression leaves on the table relative to the truly optimal exercise rule, not merely of Monte Carlo estimation error. The dual estimator is itself known to be biased upward in finite samples: $\max_i(\cdot)$ is a convex functional, so Jensen's inequality pushes the nested-simulation estimate above its population value. That bias shrinks as $n_{\text{inner}} \to \infty$ but is not corrected for here, so the true gap is likely somewhat smaller than \$0.23.
+
+\section{Discussion and Limitations}
+
+The practical conclusion is that, at least for a plain 12-date Bermudan put under Black--Scholes, the specific choice among a low-order polynomial, a piecewise-linear basis, a kernel regression, and a Black--Scholes-informed basis barely matters for the final price once the policy is validated out-of-sample; the much larger effect on the reported price came from the in-sample-vs-out-of-sample choice in Section~\ref{sec:bias}--\ref{sec:lowerbound}, not from the regression method itself. Given that the kernel method is dramatically more expensive for a statistically indistinguishable answer, the piecewise-linear, Black--Scholes-basis, or low-order polynomial choice is the more practical default here. The dual bound of Section~\ref{sec:dual} adds a second conclusion: even the cheap piecewise-linear policy is within roughly \$0.23 of the true price, an upper bound on its own suboptimality, so none of the four regression choices compared in Table~\ref{tab:results} is likely to be leaving large amounts of value on the table.
+
+This analysis has two scope limitations worth stating plainly. First, we test one hyperparameter setting per method (one polynomial degree, one knot grid, one bandwidth rule, and one outer/inner sample size for the dual bound) rather than sweeping over them, so the near-equivalence in Table~\ref{tab:results} and the \$0.23 duality gap should not be read as universal claims, only as what holds at these particular settings. Second, as noted in Section~\ref{sec:bias}, the source material's own introductory demonstration contains a maturity/discounting inconsistency; we have not attempted to correct or reuse those figures, and any reader consulting that notebook directly should treat its ``reference'' Bermudan price of \$5.152 with the same caveat.
+
+\section{Conclusion}
+
+Evaluating a Longstaff--Schwartz exercise policy on the paths used to fit it is optimistic by construction, and refitting on independent test paths converts that into a valid, if conservative, lower bound. On the Bermudan put considered here, that discipline matters far more for the reported price than the specific regression basis chosen to approximate the continuation value: four quite different bases agree to within statistical noise, while differing by nearly three orders of magnitude in compute cost. Pairing that lower bound with an Andersen--Broadie dual upper bound built from the same fitted policy brackets the true price to within about \$0.23, confirming that even the cheapest regression choices tested here are already close to optimal for this problem.
+
+\begin{thebibliography}{9}
+
+\bibitem{longstaffschwartz2001}
+Longstaff, F. A., \& Schwartz, E. S. (2001).
+Valuing American options by simulation: a simple least-squares approach.
+\textit{The Review of Financial Studies}, 14(1), 113--147.
+
+\bibitem{carriere1996}
+Carriere, J. F. (1996).
+Valuation of the early-exercise price for options using simulations and nonparametric regression.
+\textit{Insurance: Mathematics and Economics}, 19(1), 19--30.
+
+\bibitem{tsitsiklisvanroy2001}
+Tsitsiklis, J. N., \& Van Roy, B. (2001).
+Regression methods for pricing complex American-style options.
+\textit{IEEE Transactions on Neural Networks}, 12(4), 694--703.
+
+\bibitem{morenonavas2003}
+Moreno, M., \& Navas, J. F. (2003).
+On the robustness of least-squares Monte Carlo (LSM) for pricing American derivatives.
+\textit{Review of Derivatives Research}, 6(2), 107--127.
+
+\bibitem{broadieglasserman1997}
+Broadie, M., \& Glasserman, P. (1997).
+Pricing American-style securities using simulation.
+\textit{Journal of Economic Dynamics and Control}, 21(8--9), 1323--1352.
+
+\bibitem{andersenbroadie2004}
+Andersen, L., \& Broadie, M. (2004).
+Primal-dual simulation algorithm for pricing multidimensional American options.
+\textit{Management Science}, 50(9), 1222--1234.
+
+\bibitem{rogers2002}
+Rogers, L. C. G. (2002).
+Monte Carlo valuation of American options.
+\textit{Mathematical Finance}, 12(3), 271--286.
+
+\bibitem{haughkogan2004}
+Haugh, M. B., \& Kogan, L. (2004).
+Pricing American options: a duality approach.
+\textit{Operations Research}, 52(2), 258--270.
+
+\end{thebibliography}
+
+\end{document}
